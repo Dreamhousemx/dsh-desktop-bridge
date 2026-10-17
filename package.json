@@ -1,0 +1,52 @@
+{
+  "name": "dsh-desktop-bridge",
+  "version": "0.2.0",
+  "description": "Windows notifications for DSH: a bottom-right toast when a session needs your confirmation or finishes. One plugin, no companion process.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/contract.mjs && node test/host-apply.mjs",
+    "test:bundle": "node test/contract.mjs",
+    "test:host": "node test/host-apply.mjs",
+    "check": "node scripts/check-bundle.mjs && node scripts/verify-profile.mjs",
+    "check:profile": "node scripts/verify-profile.mjs",
+    "register-aumid": "node scripts/register-aumid.mjs",
+    "unregister-aumid": "node scripts/register-aumid.mjs --remove",
+    "check-aumid": "node scripts/register-aumid.mjs --check"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    },
+    "manifestVersion": 1
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/ingest.js",
+    "lib/notifier.js",
+    "lib/host/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "notification",
+    "toast",
+    "windows"
+  ],
+  "license": "MIT"
+}

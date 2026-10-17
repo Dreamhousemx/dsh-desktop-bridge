@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# The plugin writes nothing into the package, but keep local experiments out.
+scratch/
+tmp/

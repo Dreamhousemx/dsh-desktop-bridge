@@ -1,0 +1,10 @@
+# Register the desktop notifier as a profile-level plugin row.
+#
+# Both halves live in this one package. The client half watches uiSession state
+# and POSTs events to a host route; the host half turns those events into Windows
+# toasts. There is no companion process to start. It adds no visible UI, no
+# settings surface, and no workspace mount, so removing this row removes every
+# trace of it.
+- insert:
+    - id: dsh-desktop-bridge
+      name: dsh-desktop-bridge
