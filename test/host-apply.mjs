@@ -61,10 +61,11 @@ check('declares the webServer service', () => {
 
 const dispose = apply(ctx)
 
-check('registers /ingest and /health, nothing else', () => {
+check('registers /ingest, /health and /probe, nothing else', () => {
   assert.deepEqual([...routes.keys()].sort(), [
     '/__dsh-desktop-bridge/health',
     '/__dsh-desktop-bridge/ingest',
+    '/__dsh-desktop-bridge/probe',
   ])
 })
 

@@ -53,12 +53,13 @@ POST /__dsh-desktop-bridge/ingest
 | 路由 | 认证 | 用途 |
 |---|---|---|
 | `POST /__dsh-desktop-bridge/ingest` | Bearer token | 浏览器端上报事件 |
-| `GET /__dsh-desktop-bridge/health` | 无 | 存活探测，不泄露任何内容 |
+| `GET /__dsh-desktop-bridge/health` | 无 | 存活探测 + 各阶段计数，不泄露任何内容 |
+| `POST /__dsh-desktop-bridge/probe` | Bearer token | 仅在 `debug` 开启时：浏览器端把每次状态发布的内容记进日志 |
 
 "同源"不等于"可信"——本机任何进程都能连 127.0.0.1。所以宿主每个进程随机生成一个 token，用 `webserver/index-inject` 注入进 index.html，`/ingest` 要求它作 Bearer 凭证，随进程消亡。
 
 ```js
-globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1 }
+globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 ```
 
 每次渲染 index 都会重新注入，刷新页面后 token 不会失效。
@@ -81,24 +82,45 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1 }
 
 `title` 取 `sessions.list` 的行投影，无标题时退化为 `会话 <前8位id>`。
 
+`isMain` 由浏览器端补上（该会话是否正占据主视图）。宿主看得见窗口，但只有页面知道屏幕上摆的是哪个会话，焦点门控需要这一位——否则「你在看 DSH」会连带压掉其它会话的完成提醒。
+
 ## 提醒规则（`lib/host/dispatch.js`）
 
 按顺序判定，先命中先返回：
 
 1. **去重**：最近 200 条 `dedupeKey` 命中即丢弃
 2. **免打扰**：`quietHours` 内只记日志
-3. **焦点门控**：**只门控 `done`**——你正看着 DSH 时不必告诉你活儿干完了；`waiting` 不门控，因为等待需要你动手，跟你在看什么无关
+3. **焦点门控**（默认关闭）：**只门控 `done`**，且只在「该会话正是主视图那一个 + DSH 在前台」时压掉；`waiting` 从不门控，因为等待需要你动手，跟你在看什么无关
 4. **限流**：同类最小间隔 3 秒，超限的攒成一条摘要（「另外 2 个会话也在等你」）
 
-设置写在 `%LOCALAPPDATA%\dsh-desktop-notifier\settings.json`：
+设置写在 `%LOCALAPPDATA%\dsh-desktop-notifier\settings.json`（改完重启 DSH 生效）：
 
 ```json
 {
   "throttleMs": 3000,
-  "suppressWhenFocused": true,
-  "quietHours": { "enabled": false, "from": "23:00", "to": "08:00" }
+  "suppressWhenFocused": false,
+  "quietHours": { "enabled": false, "from": "23:00", "to": "08:00" },
+  "debug": false
 }
 ```
+
+`suppressWhenFocused` 默认 **false**：一轮任务结束时页面本身不给任何提示，这正是这个插件存在的理由——默认静音会把它变成一个看起来坏掉的功能。`debug` 打开后浏览器端会把每次 `sessionStatus` 发布的快照 POST 到 `/probe`，用来判断「渲染进程到底有没有看见这次状态变化」。
+
+## 没弹窗怎么查
+
+日志在 `%LOCALAPPDATA%\dsh-desktop-notifier\notifier.log`，一条事件的完整生命线都会留下痕迹：
+
+| 日志 | 含义 |
+|---|---|
+| 完全没有 `ingest:` | 事件没离开浏览器（渲染半边未订阅上，或 token 没注入） |
+| `auth: POST /ingest rejected` | token 不匹配，通常是页面缓存了上一个进程的 token，刷新即可 |
+| `ingest: done "…"` + `dispatch: shown` | 已交给系统，问题在 Windows 通知设置/专注助手 |
+| `dispatch: suppressed (…quiet hours…)` | 免打扰窗口命中 |
+| `dispatch: suppressed (…on screen and DSH is focused…)` | 焦点门控命中，把 `suppressWhenFocused` 改回 `false` |
+| `dispatch: throttled` | 3 秒限流，事件攒成了摘要 |
+| `dispatch: duplicate` | 同一事件重复投递，正常情况下不该出现 |
+
+`GET /__dsh-desktop-bridge/health` 用计数器把这几段分开：`received`（到达宿主）→ `shown`（真的弹了）/ `suppressed`。
 
 ## 已知边界
 
@@ -118,6 +140,7 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1 }
 
 ```bash
 node test/contract.mjs    # 浏览器半边：信封格式、inject 完整性、边沿行为
+node test/defaults.mjs    # 默认值与路由命名：默认静音这类回归由它守着
 node test/host-apply.mjs  # 宿主半边：路由注册、token 注入、鉴权、去重
                           # 会真的弹一条通知，这是刻意的
 node scripts/check-bundle.mjs    # bundle 静态契约
