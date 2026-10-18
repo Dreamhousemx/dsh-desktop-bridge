@@ -67,7 +67,7 @@ POST /__dsh-desktop-bridge/ingest
 | 路由 | 认证 | 用途 |
 |---|---|---|
 | `POST /__dsh-desktop-bridge/ingest` | Bearer token | 浏览器端上报事件 |
-| `GET /__dsh-desktop-bridge/health` | 无 | 存活探测 + 各阶段计数，不泄露任何内容 |
+| `GET /__dsh-desktop-bridge/health` | 无 | 存活探测 + 各阶段计数 + 本进程接受的 kind，不泄露任何内容 |
 | `POST /__dsh-desktop-bridge/probe` | Bearer token | 仅在 `debug` 开启时：浏览器端把每次状态发布的内容记进日志 |
 
 "同源"不等于"可信"——本机任何进程都能连 127.0.0.1。所以宿主每个进程随机生成一个 token，用 `webserver/index-inject` 注入进 index.html，`/ingest` 要求它作 Bearer 凭证，随进程消亡。
@@ -154,7 +154,13 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = {
 
 第三种（`failed`）如果始终不出现，先确认 `lib/client.js` 的 `inject` 里有 `remote`——`api-session/error` 走这条通道，缺了它就只能退回「一律当作完成」。
 
-`GET /__dsh-desktop-bridge/health` 用计数器把这几段分开：`received`（到达宿主）→ `shown`（真的弹了）/ `suppressed`。
+`GET /__dsh-desktop-bridge/health` 用计数器把这几段分开：`received`（到达宿主）→ `shown`（真的弹了）/ `suppressed`。它还返回 `kinds`，也就是**这个宿主进程真正接受的 kind 列表**——刷新页面不用重启就能换浏览器半边，所以「我页面上是新的，宿主是不是旧的」是个真问题，答案就在这里：
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:4814/__dsh-desktop-bridge/health).kinds
+# ["waiting","done","failed"]  -> 宿主已跟上
+# ["waiting","done"]           -> 宿主还是旧的，失败那一轮会保持安静，重启 DSH
+```
 
 ## 已知边界
 
@@ -164,7 +170,8 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = {
 - **事件不落盘。** 通知是即时的，补发过时通知只会制造噪音。
 - **通知标题「DSH 任务提醒」来自本机 AUMID 注册**，不是插件名。
 - **Windows 专属。** toast 走 WinRT，只有 Windows 有。
-- **两半不同步。** 刷新页面就换上了新的 `lib/client.js`，而 `lib/index.js` 要重启 DSH 才换。宿主注入的 `__DSH_DESKTOP_BRIDGE__.kinds` 声明它会收哪些 kind：页面碰到宿主还不认识的 kind 就不发（只在控制台留一行提示），**不会**降级成 `done`——把失败说成「任务已完成」正是要修的那个 bug。所以刚升级完、还没重启时，失败那一轮是安静的；重启后立刻恢复。
+- **两半不同步。** 刷新页面就换上了新的 `lib/client.js`，而 `lib/index.js` 要重启 DSH 才换。宿主注入的 `__DSH_DESKTOP_BRIDGE__.kinds` 声明它会收哪些 kind：页面碰到宿主还不认识的 kind 就不发（只在控制台留一行提示），**不会**降级成 `done`——把失败说成「任务已完成」正是要修的那个 bug。所以刚升级完、还没重启时，失败那一轮是安静的；重启后立刻恢复。想知道当前运行中的宿主是哪一版，读 `/health` 的 `kinds` 即可。
+- **失败提醒只在「轮次收尾」出现。** 依赖宿主转发的 `api-session/error`，它在 agent loop 里由 `throwError` 发出，早于 `running → idle` 的相位切换；用户主动停止（`aborted`）不发这个事件，所以停止不会被报成失败。
 
 ## 出错时的行为
 

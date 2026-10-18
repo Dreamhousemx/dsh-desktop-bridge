@@ -138,6 +138,12 @@ console.log('\nroutes')
     const payload = JSON.parse(r.res.body)
     assert.equal(payload.ok, true)
   })
+  // The client half can only tell "is the running host newer than my page?" if
+  // the host says what it accepts. Without this the answer is a restart-and-hope.
+  check('GET /health reports the kinds this host accepts', () => {
+    const payload = JSON.parse(r.res.body)
+    assert.deepEqual(payload.kinds, ['waiting', 'done', 'failed'])
+  })
 }
 
 // An unauthenticated ingest must be refused: any local process can reach the port.
