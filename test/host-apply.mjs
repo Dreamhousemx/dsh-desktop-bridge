@@ -77,6 +77,7 @@ check('publishes the token global into index.html', () => {
   assert.ok(row, 'no global row pushed')
   assert.equal(row.name, '__DSH_DESKTOP_BRIDGE__')
   assert.equal(row.value.protocol, 1)
+  assert.deepEqual(row.value.kinds, ['waiting', 'done', 'failed'], 'the page decides what to send from this list')
   assert.match(row.value.token, /^[0-9a-f]{48}$/, 'token must be 24 random bytes in hex')
 })
 

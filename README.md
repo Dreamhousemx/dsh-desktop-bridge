@@ -32,8 +32,8 @@ DSH 页面里的确认面板只在你**正看着 DSH** 时才有用。真正会�
 ```
 浏览器渲染进程                        宿主进程（DSH 自己）
 ──────────────                       ─────────────────────
-uiSession.sessionStatus
-   │ 订阅、比对、取边沿
+uiSession.sessionStatus  +  api-session/error
+   │ 订阅、比对、取边沿（前者给时机，后者给成败）
    ▼
 POST /__dsh-desktop-bridge/ingest
    │（同源，带 Bearer token）
@@ -43,13 +43,15 @@ POST /__dsh-desktop-bridge/ingest
 
 会话状态只存在于**渲染进程**（`ui-session` 的宿主半边是个空 `apply() {}`），而发系统通知只能在**宿主进程**里做。所以两边必须有一次进程内通信——这就是那条 HTTP 路由的由来。
 
+两条信号分工明确：`sessionStatus` 说「什么时候结束」，`api-session/error` 说「结束得体不体面」。后者不能替代前者（它只在出错时发，干净跑完时什么都不发），前者也替代不了后者（它没有失败位）。
+
 路由挂在 **DSH 自带的 web 服务器**上（`ctx.webServer.register`），不另开端口。浏览器端是同源请求，没有 CORS。
 
 ## 文件
 
 | 路径 | 职责 |
 |---|---|
-| `lib/client.js` | 浏览器半边：订阅 `sessionStatus`、取边沿、POST 事件 |
+| `lib/client.js` | 浏览器半边：订阅 `sessionStatus` 取边沿、订阅 `api-session/error` 判成败、POST 事件 |
 | `lib/index.js` | 宿主入口：注册路由、注入 token、生命周期 |
 | `lib/ingest.js` | 路由处理：鉴权、限体积、把载荷规范化成事件 |
 | `lib/notifier.js` | 事件 → 通知：调度器、AUMID 预热、销毁 |
@@ -71,10 +73,17 @@ POST /__dsh-desktop-bridge/ingest
 "同源"不等于"可信"——本机任何进程都能连 127.0.0.1。所以宿主每个进程随机生成一个 token，用 `webserver/index-inject` 注入进 index.html，`/ingest` 要求它作 Bearer 凭证，随进程消亡。
 
 ```js
-globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
+globalThis.__DSH_DESKTOP_BRIDGE__ = {
+  token: "…",
+  protocol: 1,
+  kinds: ["waiting", "done", "failed"],  // 宿主认得哪些 kind
+  debug: false,
+}
 ```
 
 每次渲染 index 都会重新注入，刷新页面后 token 不会失效。
+
+`kinds` 是给「页面已经刷新、宿主还没重启」这段窗口准备的：浏览器端只发宿主声明支持的 kind，碰到不认识的就跳过并在控制台留一行，绝不把 `failed` 降级成 `done`。详见「已知边界」。
 
 ## 事件格式
 
@@ -155,6 +164,7 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 - **事件不落盘。** 通知是即时的，补发过时通知只会制造噪音。
 - **通知标题「DSH 任务提醒」来自本机 AUMID 注册**，不是插件名。
 - **Windows 专属。** toast 走 WinRT，只有 Windows 有。
+- **两半不同步。** 刷新页面就换上了新的 `lib/client.js`，而 `lib/index.js` 要重启 DSH 才换。宿主注入的 `__DSH_DESKTOP_BRIDGE__.kinds` 声明它会收哪些 kind：页面碰到宿主还不认识的 kind 就不发（只在控制台留一行提示），**不会**降级成 `done`——把失败说成「任务已完成」正是要修的那个 bug。所以刚升级完、还没重启时，失败那一轮是安静的；重启后立刻恢复。
 
 ## 出错时的行为
 

@@ -67,7 +67,7 @@ const sandbox = {
   JSON,
   Array,
   Error,
-  __DSH_DESKTOP_BRIDGE__: { token: 'test-token-000000000000000000000000000000', protocol: 1 },
+  __DSH_DESKTOP_BRIDGE__: { token: 'test-token-000000000000000000000000000000', protocol: 1, kinds: ['waiting', 'done', 'failed'] },
 }
 sandbox.globalThis = sandbox
 sandbox.window = {
@@ -266,6 +266,58 @@ check('a failed turn posts failed instead of done', () => {
   assert.equal(body.detail, 'Error: 401 Authentication failed: API key required')
 })
 
+check('a host that predates the failed kind does not get done mislabelled', () => {
+  // A page refresh loads the new client.js immediately, but the host half only
+  // changes on a DSH restart. Posting `failed` to the old host would be dropped
+  // as malformed; downgrading it to `done` would be the original bug. Silence
+  // is the honest option, and the leaked `kinds` list is what makes it exact.
+  const saved = sandbox.__DSH_DESKTOP_BRIDGE__
+  sandbox.__DSH_DESKTOP_BRIDGE__ = { token: 'test-token-000000000000000000000000000000', protocol: 1 }
+  try {
+    const { ctx, publish, emit } = makeCtx()
+    posted.length = 0
+    mod.apply(ctx)
+    publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+    emit('api-session/error', 's1', 'boom')
+    publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+
+    assert.equal(posted.length, 0, 'an unsupported kind must not be sent at all')
+  } finally {
+    sandbox.__DSH_DESKTOP_BRIDGE__ = saved
+  }
+})
+
+check('an old host still reports ordinary completions', () => {
+  const saved = sandbox.__DSH_DESKTOP_BRIDGE__
+  sandbox.__DSH_DESKTOP_BRIDGE__ = { token: 'test-token-000000000000000000000000000000', protocol: 1 }
+  try {
+    const { ctx, publish } = makeCtx()
+    posted.length = 0
+    mod.apply(ctx)
+    publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+    publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+    assert.equal(JSON.parse(posted[0].init.body).kind, 'done')
+  } finally {
+    sandbox.__DSH_DESKTOP_BRIDGE__ = saved
+  }
+})
+
+check('a host that advertises the failed kind receives it', () => {
+  const saved = sandbox.__DSH_DESKTOP_BRIDGE__
+  sandbox.__DSH_DESKTOP_BRIDGE__ = { token: 'test-token-000000000000000000000000000000', protocol: 1, kinds: ['waiting', 'done', 'failed'] }
+  try {
+    const { ctx, publish, emit } = makeCtx()
+    posted.length = 0
+    mod.apply(ctx)
+    publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+    emit('api-session/error', 's1', 'boom')
+    publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+    assert.equal(JSON.parse(posted[0].init.body).kind, 'failed')
+  } finally {
+    sandbox.__DSH_DESKTOP_BRIDGE__ = saved
+  }
+})
+
 check('a failure is reported only once, not on every later idle edge', () => {
   const { ctx, publish, emit } = makeCtx()
   posted.length = 0
@@ -344,7 +396,7 @@ check('applying and tearing down leaks no globals', () => {
     JSON,
     Array,
     Error,
-    __DSH_DESKTOP_BRIDGE__: { token: 't', protocol: 1 },
+    __DSH_DESKTOP_BRIDGE__: { token: 't', protocol: 1, kinds: ['waiting', 'done', 'failed'] },
     fetch: () => Promise.resolve({ ok: true, status: 200 }),
   }
   let loaded = null
