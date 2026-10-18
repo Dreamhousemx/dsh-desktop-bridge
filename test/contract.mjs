@@ -136,6 +136,8 @@ function makeCtx({ withToken = true } = {}) {
   const declared = new Set(mod.inject)
   let snapshot = new Map()
   const listeners = new Set()
+  /** event name -> Set of subscribers, standing in for the client event channel. */
+  const remoteListeners = new Map()
 
   const sessionStatus = {
     getSnapshot: () => snapshot,
@@ -149,9 +151,18 @@ function makeCtx({ withToken = true } = {}) {
     getSnapshot: () => ({ phase: 'ready', ids: ['s1'], byId: { s1: { title: '重构登录模块' } } }),
   }
 
+  const remote = {
+    $on: (event, fn) => {
+      if (!remoteListeners.has(event)) remoteListeners.set(event, new Set())
+      remoteListeners.get(event).add(fn)
+      return () => remoteListeners.get(event)?.delete(fn)
+    },
+  }
+
   const services = {
     uiSession: { sessionStatus },
     sessions: { list },
+    remote,
   }
 
   const target = {
@@ -175,6 +186,10 @@ function makeCtx({ withToken = true } = {}) {
     publish(next) {
       snapshot = next
       for (const fn of listeners) fn()
+    },
+    /** Simulates the host pushing a client event, e.g. `api-session/error`. */
+    emit(event, ...args) {
+      for (const fn of remoteListeners.get(event) ?? []) fn(...args)
     },
   }
 }
@@ -237,6 +252,70 @@ check('running -> idle posts done', () => {
   assert.equal(body.detail, '任务已完成')
 })
 
+check('a failed turn posts failed instead of done', () => {
+  const { ctx, publish, emit } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  emit('api-session/error', 's1', 'Error: 401 Authentication failed: API key required')
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+
+  assert.equal(posted.length, 1)
+  const body = JSON.parse(posted[0].init.body)
+  assert.equal(body.kind, 'failed', 'a failed turn must not be reported as done')
+  assert.equal(body.detail, 'Error: 401 Authentication failed: API key required')
+})
+
+check('a failure is reported only once, not on every later idle edge', () => {
+  const { ctx, publish, emit } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  emit('api-session/error', 's1', 'boom')
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  // The next turn runs cleanly; the stale failure must not colour it.
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+
+  const kinds = posted.map((p) => JSON.parse(p.init.body).kind)
+  assert.deepEqual(kinds, ['failed', 'done'])
+})
+
+check('an error recorded before a new turn starts does not leak into it', () => {
+  const { ctx, publish, emit } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  // An error arriving while idle (e.g. a background activation failure) is
+  // recorded, then invalidated as soon as a new turn begins.
+  emit('api-session/error', 's1', 'background activation failed')
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+
+  assert.equal(posted.length, 1)
+  assert.equal(JSON.parse(posted[0].init.body).kind, 'done')
+})
+
+check('failure text is trimmed to its first line and capped', () => {
+  const { ctx, publish, emit } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  emit('api-session/error', 's1', `rate limited\n    at foo (bar.js:1:1)\n    at baz`)
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  assert.equal(JSON.parse(posted[0].init.body).detail, 'rate limited')
+})
+
+check('an empty error message still says something useful', () => {
+  const { ctx, publish, emit } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  emit('api-session/error', 's1', '   ')
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  assert.equal(JSON.parse(posted[0].init.body).detail, '本轮执行失败')
+})
+
 check('an unknown pending kind still names the session', () => {
   const { ctx, publish } = makeCtx()
   posted.length = 0
@@ -245,6 +324,46 @@ check('an unknown pending kind still names the session', () => {
   publish(new Map([['s1', { running: true, pendingInteraction: { kind: 'something-new' }, completionUnread: false }]]))
   const body = JSON.parse(posted[0].init.body)
   assert.equal(body.detail, '等待你处理')
+})
+
+check('applying and tearing down leaks no globals', () => {
+  // The bundle is a classic script, so it is not strict: `x = 1` on an
+  // undeclared name does not throw, it silently creates a global. That is how
+  // a half-declared `let` survives review (`unsubscribeFailure` was assigned and
+  // read but never declared). Running in a fresh vm context makes any leak
+  // observable, because assignments land on the sandbox object itself.
+  const leakSandbox = {
+    console: { warn() {}, log() {}, error() {} },
+    Object,
+    Symbol,
+    Map,
+    Set,
+    Date,
+    String,
+    Boolean,
+    JSON,
+    Array,
+    Error,
+    __DSH_DESKTOP_BRIDGE__: { token: 't', protocol: 1 },
+    fetch: () => Promise.resolve({ ok: true, status: 200 }),
+  }
+  let loaded = null
+  leakSandbox.window = { __ModuleLoader__: { load: (m) => { loaded = m } } }
+  const before = new Set(Object.getOwnPropertyNames(leakSandbox))
+  vm.runInNewContext(source, leakSandbox, { filename: 'leak-probe.js' })
+  const modUnderTest = loaded.factory(() => ({}))
+
+  const listeners = new Set()
+  const ctx = {
+    effect: (fn) => fn(),
+    uiSession: { sessionStatus: { getSnapshot: () => new Map(), subscribe: (f) => (listeners.add(f), () => listeners.delete(f)) } },
+    sessions: { list: { getSnapshot: () => ({ phase: 'ready', ids: [], byId: {} }) } },
+    remote: { $on: () => () => {} },
+  }
+  modUnderTest.apply(ctx)
+
+  const leaked = Object.getOwnPropertyNames(leakSandbox).filter((name) => !before.has(name))
+  assert.deepEqual(leaked, [], `the bundle leaked globals: ${leaked.join(', ')}`)
 })
 
 // ---------------------------------------------------------------------------

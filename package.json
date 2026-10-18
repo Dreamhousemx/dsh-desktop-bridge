@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-bridge",
-  "version": "0.2.0",
-  "description": "Windows notifications for DSH: a bottom-right toast when a session needs your confirmation or finishes. One plugin, no companion process.",
+  "version": "0.3.0",
+  "description": "Windows notifications for DSH: a bottom-right toast when a session needs your confirmation, finishes, or fails. One plugin, no companion process.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

@@ -1,17 +1,29 @@
 # dsh-desktop-bridge
 
-在屏幕**右下角**弹 Windows 系统通知：会话**需要你确认**时一条，**任务完成**时一条。
+在屏幕**右下角**弹 Windows 系统通知：会话**需要你确认**时一条，**任务完成**时一条，**执行失败**时一条。
 
 一个插件搞定，没有配套桌面程序、没有第二个端口、没有发现文件、没有要手动启动的东西。
 
-## 为什么是这两类时机
+## 为什么是这三类时机
 
-DSH 页面里的确认面板只在你**正看着 DSH** 时才有用。真正会丢消息的情况是反过来的——你在别的窗口忙，会话卡在等你批准，或者已经跑完了，而页面在后台。
+DSH 页面里的确认面板只在你**正看着 DSH** 时才有用。真正会丢消息的情况是反过来的——你在别的窗口忙，会话卡在等你批准，或者已经跑完了、甚至已经报错了，而页面在后台。
 
-所以这里只在两个**边沿**上打扰你：
+所以这里只在三个**边沿**上打扰你：
 
 - **需要你确认**：`pendingInteraction` 从无到有。`kind` 有 `approval`（批准操作）、`plan-review`（确认计划）、`question`（回答问题）三种，通知正文会写明是哪一种。
-- **任务完成**：`running` 从 true 变 false。也看 `completionUnread`，但它**只对非主视图的会话**设置，只看它会漏掉「你正看着它跑完」这个最常见的情况。
+- **任务完成**：`running` 从 true 变 false，且这一轮没有报错。也看 `completionUnread`，但它**只对非主视图的会话**设置，只看它会漏掉「你正看着它跑完」这个最常见的情况。
+- **执行失败**：同一时刻，但这一轮**真的出错了**。失败的轮次不会产出任何东西，通常还等着你重试，把这种结局叫作「任务已完成」是纯粹的误导——用户会以为活干完了。
+
+### 失败是怎么认出来的
+
+`uiSession.sessionStatus` 的快照只有 `{running, pendingInteraction, completionUnread}` 三个字段，**没有失败位**：干净跑完和报错停掉在它看来一模一样。所以失败信号来自客户端的另一条事件通道 `api-session/error`（宿主由 agent 循环的 `agent/error` 转发而来，每个真正失败的轮次一条，带错误文本）。
+
+关键是它**只在真出错时发射**：用户自己按停止不会产生 `agent/error`（那条路径走 `aborted`），因此「你主动中断」不会被误报成失败。浏览器端收到错误就按会话记一笔，等随后的 `running → idle` 边沿到来时取用一次：
+
+- 新的一轮开始时清掉旧记录，避免上一轮的失败给下一轮的健康收尾染色；
+- 记录超过 2 分钟就作废，避免一个与轮次无关的错误（比如后台激活失败）在很久之后才误伤一次正常完成。
+
+失败通知**永远不受焦点门控影响**：页面会把错误显示在对话里，而那正是走开的人不会看的地方。
 
 首次观测到的会话只记基线不通知，否则一刷页面就会把所有在等的会话重播一遍。同一会话同一类型还有冷却，避免状态反复发布把提示刷屏。
 
@@ -80,6 +92,16 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 
 `dedupeKey` 由宿主按 `kind:sessionId:秒` 盖出来，浏览器端只管发前五个字段——重复投递由宿主识别。
 
+`kind` 有三种取值：
+
+| kind | 含义 | 正文 |
+|---|---|---|
+| `waiting` | 会话卡在等你动手 | 需要你确认 · `「会话」正在等待你的操作：<等待你干什么>` |
+| `done` | 这一轮干净跑完 | 任务已完成 · `「会话」已执行完毕：任务已完成` |
+| `failed` | 这一轮报错停掉 | 任务失败 · `「会话」执行出错了，需要你处理：<错误首行>` |
+
+`failed` 的 `detail` 是错误信息的第一行，超过 120 字截断——堆栈和多段散文在通知里都读不了。
+
 `title` 取 `sessions.list` 的行投影，无标题时退化为 `会话 <前8位id>`。
 
 `isMain` 由浏览器端补上（该会话是否正占据主视图）。宿主看得见窗口，但只有页面知道屏幕上摆的是哪个会话，焦点门控需要这一位——否则「你在看 DSH」会连带压掉其它会话的完成提醒。
@@ -90,7 +112,7 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 
 1. **去重**：最近 200 条 `dedupeKey` 命中即丢弃
 2. **免打扰**：`quietHours` 内只记日志
-3. **焦点门控**（默认关闭）：**只门控 `done`**，且只在「该会话正是主视图那一个 + DSH 在前台」时压掉；`waiting` 从不门控，因为等待需要你动手，跟你在看什么无关
+3. **焦点门控**（默认关闭）：**只门控 `done`**，且只在「该会话正是主视图那一个 + DSH 在前台」时压掉；`waiting` 和 `failed` 从不门控——等待需要你动手、失败需要你重试，都跟你在看什么无关
 4. **限流**：同类最小间隔 3 秒，超限的攒成一条摘要（「另外 2 个会话也在等你」）
 
 设置写在 `%LOCALAPPDATA%\dsh-desktop-notifier\settings.json`（改完重启 DSH 生效）：
@@ -119,12 +141,16 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 | `dispatch: suppressed (…on screen and DSH is focused…)` | 焦点门控命中，把 `suppressWhenFocused` 改回 `false` |
 | `dispatch: throttled` | 3 秒限流，事件攒成了摘要 |
 | `dispatch: duplicate` | 同一事件重复投递，正常情况下不该出现 |
+| 失败的一轮弹了「任务已完成」 | `api-session/error` 没到达渲染进程：控制台应有 `[desktop-bridge] cannot subscribe to api-session/error` |
+
+第三种（`failed`）如果始终不出现，先确认 `lib/client.js` 的 `inject` 里有 `remote`——`api-session/error` 走这条通道，缺了它就只能退回「一律当作完成」。
 
 `GET /__dsh-desktop-bridge/health` 用计数器把这几段分开：`received`（到达宿主）→ `shown`（真的弹了）/ `suppressed`。
 
 ## 已知边界
 
 - **没有逐条 todo 清单。** `todos` 是 session 作用域的 keyed projection，只有会话内的对话视图能读，这里拿不到。通知只能给会话级信号。
+- **失败按「轮次」而不是按「错误」报。** 一个轮次里连续报错多次只会在收尾时提示一次，正文取最近一次的错误信息。
 - **`title` 依赖投影就绪。** 会话刚建立时投影可能还没算出来，此时标题退化为 id 片段。
 - **事件不落盘。** 通知是即时的，补发过时通知只会制造噪音。
 - **通知标题「DSH 任务提醒」来自本机 AUMID 注册**，不是插件名。
@@ -139,10 +165,10 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = { token: "…", protocol: 1, debug: false }
 ## 测试
 
 ```bash
-node test/contract.mjs    # 浏览器半边：信封格式、inject 完整性、边沿行为
+node test/contract.mjs    # 浏览器半边：信封格式、inject 完整性、边沿行为（含失败判定）
 node test/defaults.mjs    # 默认值与路由命名：默认静音这类回归由它守着
 node test/host-apply.mjs  # 宿主半边：路由注册、token 注入、鉴权、去重
-                          # 会真的弹一条通知，这是刻意的
+                          # 会真的弹两条通知，这是刻意的
 node scripts/check-bundle.mjs    # bundle 静态契约
 node scripts/verify-profile.mjs  # profile 接线是否完好
 ```

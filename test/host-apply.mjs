@@ -153,7 +153,7 @@ console.log('\nroutes')
 // ---------------------------------------------------------------------------
 // The real thing: an authenticated event must reach Windows.
 // ---------------------------------------------------------------------------
-console.log('\nend to end (this shows one real toast)')
+console.log('\nend to end (this shows two real toasts)')
 
 const event = {
   kind: 'waiting',
@@ -191,6 +191,28 @@ const event = {
   check('replaying the same event is deduped', () => {
     const payload = JSON.parse(r.res.body)
     assert.deepEqual(payload.results, ['duplicate'])
+  })
+}
+
+{
+  // A failed turn must never be announced with the completion copy.
+  const r = request({
+    headers: { authorization: `Bearer ${token}` },
+    body: {
+      kind: 'failed',
+      sessionId: 'self-check',
+      title: '插件自检',
+      detail: 'Error: 401 Authentication failed: API key required',
+      at: Date.now(),
+    },
+  })
+  const done = r.send()
+  routes.get('/__dsh-desktop-bridge/ingest').handler(r.req, r.res)
+  await done
+  check('a failed event is accepted and shown as its own kind', () => {
+    const payload = JSON.parse(r.res.body)
+    assert.equal(r.res.status, 202)
+    assert.deepEqual(payload.results, ['shown'])
   })
 }
 

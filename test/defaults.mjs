@@ -8,7 +8,7 @@
  */
 
 import { DEFAULT_SETTINGS, HEALTH_PATH, INGEST_PATH, PROBE_PATH, TOKEN_GLOBAL } from '../lib/host/constants.js'
-import { NOTIFY_KIND, PROTOCOL_VERSION, makeEvent } from '../lib/host/protocol.js'
+import { NOTIFY_KIND, NOTIFY_KINDS, PROTOCOL_VERSION, makeEvent, validateEvent } from '../lib/host/protocol.js'
 
 let failures = 0
 
@@ -40,6 +40,14 @@ check('dedupe key is stable per second', ev.dedupeKey === 'done:abc:1700000000',
 check('isMain is left undefined when unstated', ev.isMain === undefined, String(ev.isMain))
 check('isMain survives as false', makeEvent({ kind: 'done', sessionId: 'a', isMain: false }).isMain === false)
 check('isMain survives as true', makeEvent({ kind: 'done', sessionId: 'a', isMain: true }).isMain === true)
+
+console.log('\nfailure kind')
+check('failed is a first-class kind', NOTIFY_KIND.failed === 'failed', NOTIFY_KIND.failed)
+check('every kind validates', NOTIFY_KINDS.every((k) => validateEvent(makeEvent({ kind: k, sessionId: 'a' })) === null))
+const failed = makeEvent({ kind: 'failed', sessionId: 'abc', detail: 'boom', at: 1700000000000 })
+check('failed events normalise like any other kind', failed !== null && failed.kind === 'failed', String(failed))
+check('failed has its own dedupe namespace', failed.dedupeKey === 'failed:abc:1700000000', failed.dedupeKey)
+check('an unknown kind is still rejected', makeEvent({ kind: 'nope', sessionId: 'a' }) === null)
 
 console.log(failures === 0 ? '\nall checks passed' : `\n${failures} check(s) failed`)
 process.exit(failures === 0 ? 0 : 1)
