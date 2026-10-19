@@ -25,6 +25,17 @@ DSH 页面里的确认面板只在你**正看着 DSH** 时才有用。真正会�
 
 失败通知**永远不受焦点门控影响**：页面会把错误显示在对话里，而那正是走开的人不会看的地方。
 
+### 一轮只弹一次
+
+`running → idle` 和 `completionUnread` 说的是同一件事，但它们**不是同一瞬间变真的**：宿主在 idle 边沿之后才把这个标记落下去。所以同一轮会先后命中两个分支，弹出两条提示：
+
+```
+06:21:04  任务已完成 | 「删除会话插件来源」 已执行完毕：任务已完成
+06:21:24  任务已完成 | 「删除会话插件来源」 已执行完毕：后台任务已完成
+```
+
+浏览器端因此维护一个「这一轮已经报过收尾」的集合：任一分支报过就不再报，只有新的一轮（`running` 由 false 变 true）才重新武装。这也顺带解决了「刷新页面时把已经完成的会话重播一遍」——首次观测到且已 idle 的会话直接算作已报过。
+
 首次观测到的会话只记基线不通知，否则一刷页面就会把所有在等的会话重播一遍。同一会话同一类型还有冷却，避免状态反复发布把提示刷屏。
 
 ## 架构
@@ -179,12 +190,47 @@ globalThis.__DSH_DESKTOP_BRIDGE__ = {
 
 同样地，`lib/client.js` 必须保持 `window.__ModuleLoader__.load({ id, factory })` 的经典脚本信封：一个顶层 `export` 就会让渲染进程抛 `Unexpected token 'export'`，导致整个 web boot 失败（`web boot: 1 entry did not activate`）。这是本项目真实踩过的坑，`test/contract.mjs` 专门守着它。
 
+## 兼容性
+
+插件只依赖四个宿主/客户端 API，且全部在**运行时验证过**，不是照文档猜的：
+
+| 依赖的 API | 用途 | 在 0.2.1-rc.2 上核对结果 |
+|---|---|---|
+| `webServer.register({kind, path, handler})` | 注册三条路由 | 仍在，冲突时仍抛 `webserver: duplicate exact route`，仍返回 disposer |
+| `webserver/index-inject` 事件 | 把 token 注入 index.html | 仍每次渲染都 emit，仍是 `{kind:'global', name, value}` |
+| `uiSession.sessionStatus` 快照 | 取 `running` / `pendingInteraction` / `completionUnread` 边沿 | 三个字段名与含义未变，`publishStatus()` 的结构逐字一致 |
+| `sessions.list` 的 `retainedBy.mainView` | 判断会话是否在主视图 | 仍在 |
+| `remote.$on("api-session/error", (sessionId, message)")` | 判定失败 | 仍在，签名与官方自己的客户端一致（`message` 为 stringified error） |
+
+**验证过的版本**：`@deepseek-ai/dsh` 0.2.1-rc.2（DeepSeek Harness 44.7.0）。
+
+DSH 升级后如果通知失灵，先跑 `/health` 看 `kinds`；再对照上表看哪个 API 变了。升级最容易打破的两个点：
+
+1. `sessionStatus` 快照字段改名或增删 → 页面永远算不出边沿，`received` 一直不涨
+2. `api-session/error` 改事件名或参数顺序 → 失败退回「一律报完成」
+
+## 任务清单
+
+维护一个功能时可以直接照着走：
+
+- [x] **基础提醒**：会话需要确认 / 任务完成时弹 Windows 系统通知
+- [x] **合并为单插件**：合并掉旧的双进程架构，无配套进程、无第二端口
+- [x] **完成提醒默认不被静音**：`suppressWhenFocused` 默认 false（踩过：默认 true 让功能看起来完全坏掉）
+- [x] **失败不再冒充成功**：接 `api-session/error`，失败的一轮弹「任务失败」
+- [x] **两半版本不同步的保护**：宿主声明 `kinds`，页面不向旧宿主发它不认识的 kind（宁可不弹，不弹错）
+- [x] **`/health` 可查宿主版本**：返回 `kinds`，把「宿主是新是旧」变成一次 GET
+- [x] **一轮只弹一次**：修掉 `completionUnread` 晚到导致的重复提示
+- [x] **真实失败轮次现场验证**：`06:20:59 toast: 任务失败 | 「问候交流」…：fetch failed`
+- [x] **适配 0.2.1-rc.2**：逐个核对五个 API 面，均未变
+- [ ] **可选：点通知跳回对应会话**（当前只把 DSH 窗口拉到前台，不定位会话）
+- [ ] **可选：会话标题变化时更新去重键**（当前同秒同名事件会被去重）
+
 ## 测试
 
 ```bash
-node test/contract.mjs    # 浏览器半边：信封格式、inject 完整性、边沿行为（含失败判定）
+node test/contract.mjs    # 浏览器半边：信封格式、inject 完整性、边沿行为（含失败判定、一轮一次）
 node test/defaults.mjs    # 默认值与路由命名：默认静音这类回归由它守着
-node test/host-apply.mjs  # 宿主半边：路由注册、token 注入、鉴权、去重
+node test/host-apply.mjs  # 宿主半边：路由注册、token 注入、鉴权、去重、kinds 声明
                           # 会真的弹两条通知，这是刻意的
 node scripts/check-bundle.mjs    # bundle 静态契约
 node scripts/verify-profile.mjs  # profile 接线是否完好

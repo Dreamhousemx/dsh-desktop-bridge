@@ -252,6 +252,46 @@ check('running -> idle posts done', () => {
   assert.equal(body.detail, '任务已完成')
 })
 
+check('one finished turn produces exactly one toast', () => {
+  // The host persists `completionUnread` just *after* the running->idle edge, so a
+  // later publication re-presents an already-reported finish. Live evidence:
+  // 06:21:04 "任务已完成" then 06:21:24 "后台任务已完成" for one session.
+  const { ctx, publish } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  // Idle edge first, flag still false.
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  // Then the flag flips true and the snapshot is republished.
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: true }]]))
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: true }]]))
+
+  const kinds = posted.map((p) => JSON.parse(p.init.body).kind)
+  assert.deepEqual(kinds, ['done'], `expected one toast, got ${kinds.join(',')}`)
+})
+
+check('a completion unread on first sighting is not replayed', () => {
+  const { ctx, publish } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  // Page loads onto a session that already finished while unwatched.
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: true }]]))
+  assert.equal(posted.length, 0, 'loading the page must not replay old completions')
+})
+
+check('a new turn re-arms the completion report', () => {
+  const { ctx, publish } = makeCtx()
+  posted.length = 0
+  mod.apply(ctx)
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  // Second turn in the same session must still notify.
+  publish(new Map([['s1', { running: true, pendingInteraction: undefined, completionUnread: false }]]))
+  publish(new Map([['s1', { running: false, pendingInteraction: undefined, completionUnread: false }]]))
+  const kinds = posted.map((p) => JSON.parse(p.init.body).kind)
+  assert.deepEqual(kinds, ['done', 'done'])
+})
+
 check('a failed turn posts failed instead of done', () => {
   const { ctx, publish, emit } = makeCtx()
   posted.length = 0
